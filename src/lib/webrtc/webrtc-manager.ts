@@ -7,9 +7,11 @@ import {
   FILE_CHUNK_HEADER_OFFSET,
   FILE_CHUNK_INDEX_OFFSET,
   FILE_CHUNK_PAYLOAD_OFFSET,
-  GCM_NONCE_BYTES,
+  GCM_CHUNK_NONCE_BYTES,
   GCM_TAG_BYTES,
+  MAX_FILE_BYTES,
   MAX_FILE_CHUNK_SIZE,
+  MAX_TOTAL_CHUNKS,
   TEXT_MAX_BYTES,
   type CipherEnvelope,
   type ControlMessage,
@@ -58,6 +60,12 @@ const MAX_FILE_NAME_BYTES = 1024;
 const MAX_MIME_TYPE_BYTES = 1024;
 const MAX_RESUME_CHUNKS = 2000;
 const MAX_TRACKED_FILE_IDS = 256;
+
+// Bounds for chunks buffered before their file-start header arrives. Without a
+// global cap, a peer can exhaust the tab's memory by spraying unique file ids.
+const MAX_PENDING_FILE_IDS = 32;
+const MAX_PENDING_CHUNKS_PER_FILE = 512;
+const MAX_PENDING_CHUNK_BYTES = 8 * 1024 * 1024;
 
 function byteLengthOf(value: string): number {
   return new TextEncoder().encode(value).length;
@@ -109,11 +117,16 @@ function validateControlMessage(message: ControlMessage): void {
       if (
         !Number.isInteger(message.totalChunks) ||
         message.totalChunks < 0 ||
-        message.totalChunks > 2147483647
+        message.totalChunks > MAX_TOTAL_CHUNKS
       ) {
         throw new Error("Chunk count is not valid");
       }
-      if (typeof message.fileSize !== "number" || message.fileSize < 0) {
+      if (
+        typeof message.fileSize !== "number" ||
+        !Number.isFinite(message.fileSize) ||
+        message.fileSize < 0 ||
+        message.fileSize > MAX_FILE_BYTES
+      ) {
         throw new Error("File size is not valid");
       }
       if (
@@ -144,6 +157,14 @@ function validateControlMessage(message: ControlMessage): void {
         message.missingChunks.length > MAX_RESUME_CHUNKS
       ) {
         throw new Error("Resume request is not valid");
+      }
+      // Every index must be a non-negative integer. Negative values would make
+      // Blob.slice read from the end of the file, and duplicates would corrupt
+      // the transfer accounting and cause a permanent "incomplete" verdict.
+      for (const index of message.missingChunks) {
+        if (!Number.isInteger(index) || index < 0 || index > 0x7fffffff) {
+          throw new Error("Resume request contains an invalid chunk index");
+        }
       }
       break;
     }
@@ -180,11 +201,25 @@ function validateControlMessage(message: ControlMessage): void {
   }
 }
 
-function chunkNonce(seed: Uint8Array, fileId: number): Uint8Array {
-  const nonce = new Uint8Array(GCM_NONCE_BYTES);
+/**
+ * Per-chunk AES-GCM nonce: `seed(8) || fileId(4) || chunkIndex(4)`.
+ *
+ * The chunk index MUST be part of the nonce. Reusing a (key, nonce) pair under
+ * AES-GCM is catastrophic: it leaks the XOR of plaintexts and destroys
+ * authentication. The previous `seed || fileId` form was identical for every
+ * chunk of a file, and a resumed transfer re-encrypted the same chunk under the
+ * same nonce again.
+ */
+function chunkNonce(
+  seed: Uint8Array,
+  fileId: number,
+  chunkIndex: number
+): Uint8Array {
+  const nonce = new Uint8Array(GCM_CHUNK_NONCE_BYTES);
   nonce.set(seed.subarray(0, 8), 0);
   const view = new DataView(nonce.buffer);
   view.setUint32(8, fileId, false);
+  view.setUint32(12, chunkIndex >>> 0, false);
   return nonce;
 }
 
@@ -209,7 +244,7 @@ async function parseChunkFrame(
     payload = await decryptPayload(
       encryptionKey,
       ciphertext,
-      chunkNonce(seed, fileId).buffer as ArrayBuffer
+      chunkNonce(seed, fileId, chunkIndex).buffer as ArrayBuffer
     );
   }
   if (payload.byteLength > MAX_FILE_CHUNK_SIZE) {
@@ -236,10 +271,11 @@ export class WebRTCManager {
   private readonly options: WebRTCManagerOptions;
   private readonly pc: RTCPeerConnection;
   private readonly encryptionKey: CryptoKey | null;
+  private pendingFileChunkBytes = 0;
   private readonly fileSeeds = new Map<number, Uint8Array>();
   private readonly pendingIceCandidates: IceCandidate[] = [];
   private readonly pendingFileChunks = new Map<number, ArrayBuffer[]>();
-  private forcePlaintextFallback = false;
+
 
   private controlChannel: RTCDataChannel | null = null;
   private fileChannel: RTCDataChannel | null = null;
@@ -393,7 +429,7 @@ export class WebRTCManager {
     const channel = this.controlChannel;
     if (!channel || channel.readyState !== "open") return false;
 
-    const shouldEncrypt = !!this.encryptionKey && !this.forcePlaintextFallback;
+    const shouldEncrypt = !!this.encryptionKey;
     if (message.kind === "file-start" && shouldEncrypt) {
       const seed = new Uint8Array(8);
       globalThis.crypto.getRandomValues(seed);
@@ -453,7 +489,7 @@ export class WebRTCManager {
     if (frame.payload.byteLength > MAX_FILE_CHUNK_SIZE) {
       throw new Error("Chunk payload exceeds the size limit");
     }
-    const shouldEncrypt = !!this.encryptionKey && !this.forcePlaintextFallback;
+    const shouldEncrypt = !!this.encryptionKey;
     let seed: Uint8Array | undefined;
     if (shouldEncrypt) {
       seed = this.fileSeeds.get(frame.fileId);
@@ -479,7 +515,7 @@ export class WebRTCManager {
       payload = await encryptPayload(
         this.encryptionKey as CryptoKey,
         payload,
-        chunkNonce(seed, frame.fileId).buffer as ArrayBuffer
+        chunkNonce(seed, frame.fileId, frame.chunkIndex).buffer as ArrayBuffer
       );
       if (payload.byteLength !== frame.payload.byteLength + GCM_TAG_BYTES) {
         throw new Error("Encrypted chunk is the wrong length");
@@ -631,8 +667,12 @@ export class WebRTCManager {
             envelope as CipherEnvelope
           );
         } else {
-          if (this.encryptionKey && !this.forcePlaintextFallback) {
-            this.forcePlaintextFallback = true;
+          // Fail closed. A keyed peer must never silently accept plaintext: that
+          // would let a malicious peer strip confidentiality with one message.
+          if (this.encryptionKey) {
+            throw new Error(
+              "The peer sent an unencrypted control message. This room is encrypted, so the connection was rejected to protect your data. Use the full share link on both sides, or the room code on both sides."
+            );
           }
           plainText = wireText;
         }
@@ -650,18 +690,27 @@ export class WebRTCManager {
             if (pending) {
               this.pendingFileChunks.delete(message.fileId);
               for (const buffered of pending) {
+                this.pendingFileChunkBytes = Math.max(
+                  0,
+                  this.pendingFileChunkBytes - buffered.byteLength
+                );
                 const frame = await parseChunkFrame(
                   buffered,
-                  this.encryptionKey && !this.forcePlaintextFallback
-                    ? this.encryptionKey
-                    : null,
+                  this.encryptionKey,
                   seed
                 );
                 this.options.onChunkReceived?.(frame);
               }
             }
           } catch {
-            // invalid fileNonce is treated as plaintext file
+            // A malformed seed is a protocol error, not a reason to silently
+            // fall back to plaintext for the rest of the session.
+            this.pendingFileChunks.delete(message.fileId);
+            this.reportError(
+              new Error(
+                `The peer sent an invalid encryption seed for file ${message.fileId}.`
+              )
+            );
           }
         } else if (message.kind === "file-end") {
           this.fileSeeds.delete(message.fileId);
@@ -693,19 +742,31 @@ export class WebRTCManager {
         FILE_CHUNK_HEADER_OFFSET,
         false
       );
-      const shouldDecrypt =
-        !!this.encryptionKey && !this.forcePlaintextFallback;
+      const shouldDecrypt = !!this.encryptionKey;
       let seed = this.fileSeeds.get(fileId);
       if (shouldDecrypt && !seed) {
+        // Buffer chunks that arrive before their file-start. This is bounded on
+        // purpose: a peer must not be able to exhaust memory by spraying frames
+        // for file ids that were never announced (or by flooding one id).
+        if (
+          this.pendingFileChunks.size >= MAX_PENDING_FILE_IDS ||
+          this.pendingFileChunkBytes + buffer.byteLength > MAX_PENDING_CHUNK_BYTES
+        ) {
+          this.clearPendingFileChunks();
+          throw new Error(
+            "Too much data arrived before the file headers; the transfer was rejected"
+          );
+        }
         const list = this.pendingFileChunks.get(fileId) ?? [];
-        list.push(buffer.slice(0));
-        this.pendingFileChunks.set(fileId, list);
-        if (list.length > 4096) {
-          this.pendingFileChunks.delete(fileId);
+        if (list.length >= MAX_PENDING_CHUNKS_PER_FILE) {
+          this.clearPendingFileChunks();
           throw new Error(
             "Too many chunks arrived before the file header"
           );
         }
+        list.push(buffer.slice(0));
+        this.pendingFileChunks.set(fileId, list);
+        this.pendingFileChunkBytes += buffer.byteLength;
         return;
       }
       if (!shouldDecrypt) {
@@ -721,6 +782,11 @@ export class WebRTCManager {
     } catch (error) {
       this.reportError(error);
     }
+  }
+
+  private clearPendingFileChunks(): void {
+    this.pendingFileChunks.clear();
+    this.pendingFileChunkBytes = 0;
   }
 
   private reportError(error: unknown): void {

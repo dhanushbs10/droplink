@@ -49,6 +49,15 @@ const ALLOWED_ORIGINS = (process.env.SIGNALING_ORIGINS ?? "")
   .map((origin) => origin.trim())
   .filter((origin) => origin.length > 0);
 
+// Fail closed in production: a permissive default silently exposes signaling to
+// any site, which is a one-variable mistake away from being live.
+if (ALLOWED_ORIGINS.length === 0 && process.env.NODE_ENV === "production") {
+  console.error(
+    "[droplink] SIGNALING_ORIGINS must be set in production (comma-separated allowlist). Refusing to start."
+  );
+  process.exit(1);
+}
+
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_ROOMS = 30;
 const rateLimitHits = new Map<string, number[]>();

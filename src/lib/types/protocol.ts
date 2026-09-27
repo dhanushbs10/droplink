@@ -8,11 +8,24 @@ export const MAX_FILE_CHUNK_SIZE = 16 * 1024;
 export const FILE_CHUNK_HEADER_BYTES = 8;
 export const MAX_CHUNK_FRAME_SIZE = FILE_CHUNK_HEADER_BYTES + MAX_FILE_CHUNK_SIZE;
 
+// Transfer ceilings. The advertised chunk count drives loop bounds on the
+// receiver, so it must be derived from a bounded file size rather than trusted
+// from the wire.
+export const MAX_FILE_BYTES = 8 * 1024 * 1024 * 1024; // 8 GiB
+export const MAX_TOTAL_CHUNKS = Math.ceil(MAX_FILE_BYTES / MAX_FILE_CHUNK_SIZE);
+
 export const CONTROL_MAX_BYTES = 16 * 1024;
 export const TEXT_MAX_BYTES = 8 * 1024;
 
 export const GCM_TAG_BYTES = 16;
 export const GCM_NONCE_BYTES = 12;
+/**
+ * File chunks use a longer nonce so that both the file id and the chunk index
+ * fit alongside the per-file seed. Reusing a (key, nonce) pair under AES-GCM
+ * leaks the XOR of plaintexts and voids authentication, so the chunk index must
+ * be part of the nonce. 96-bit nonces remain the default for control messages.
+ */
+export const GCM_CHUNK_NONCE_BYTES = 16;
 export const AES_256_KEY_BYTES = 32;
 
 export const HKDF_SALT = "droplink-signal-v1";
@@ -304,6 +317,12 @@ export interface ProfileShareMessage {
   kind: "profile-share";
   userId: string;
   username: string;
+  /**
+   * HMAC over `userId`, keyed by the room's share token. Both peers hold the
+   * token, so this proves the claim was made by someone who actually has it,
+   * rather than an arbitrary id asserted over the data channel.
+   */
+  identityProof?: string;
 }
 
 export type ControlMessage =

@@ -47,3 +47,6 @@ next-env.d.ts
 # auto-generated agent rules (recreated by next dev)
 AGENTS.md
 CLAUDE.md
+
+# Build output of the standalone signaling bundle (regenerate, do not commit).
+deploy/

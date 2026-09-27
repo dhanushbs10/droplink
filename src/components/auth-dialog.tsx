@@ -93,6 +93,11 @@ function AuthDialogContent({ onClose }: { onClose: () => void }) {
     event.preventDefault();
     setError(null);
     setNotice(null);
+    const supabase = getSupabase();
+    if (!supabase) {
+      setError("Accounts are not configured for this deployment.");
+      return;
+    }
     if (mode === "signup" && password !== confirmPassword) {
       setError("The passwords do not match.");
       return;
@@ -104,14 +109,14 @@ function AuthDialogContent({ onClose }: { onClose: () => void }) {
     setLoading(true);
     try {
       if (mode === "signin") {
-        const { error: authError } = await getSupabase().auth.signInWithPassword(
+        const { error: authError } = await supabase.auth.signInWithPassword(
           { email: email.trim(), password }
         );
         if (authError) throw authError;
         reset();
         onClose();
       } else {
-        const { data, error: authError } = await getSupabase().auth.signUp({
+        const { data, error: authError } = await supabase.auth.signUp({
           email: email.trim(),
           password,
           options: {
@@ -148,12 +153,17 @@ function AuthDialogContent({ onClose }: { onClose: () => void }) {
   const sendMagicLink = async () => {
     setError(null);
     setNotice(null);
+    const supabase = getSupabase();
+    if (!supabase) {
+      setError("Accounts are not configured for this deployment.");
+      return;
+    }
     const target = email.trim();
     if (!target) {
       setError("Enter your email to use a magic link.");
       return;
     }
-    const { error: otpError } = await getSupabase().auth.signInWithOtp({
+    const { error: otpError } = await supabase.auth.signInWithOtp({
       email: target,
       options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     });
@@ -171,7 +181,12 @@ function AuthDialogContent({ onClose }: { onClose: () => void }) {
     setNotice(null);
     setOauthLoading(true);
     try {
-      const { error: oauthError } = await getSupabase().auth.signInWithOAuth({
+      const supabase = getSupabase();
+      if (!supabase) {
+        setError("Accounts are not configured for this deployment.");
+        return;
+      }
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider,
         options: { redirectTo: `${window.location.origin}/auth/callback` },
       });

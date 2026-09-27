@@ -1,5 +1,7 @@
 import {
   AES_256_KEY_BYTES,
+  CONTROL_CHANNEL_LABEL,
+  FILE_CHANNEL_LABEL,
   HKDF_INFO,
   HKDF_SALT,
   type Base64Url,
@@ -152,20 +154,31 @@ export class RoomController {
       }
       if (event.peerId === this.targetPeerId) {
         this.targetPeerId = null;
+        // Tear the connection down with the peer, otherwise startWebRTC's
+        // `if (this.webrtc) return` guard blocks a future reconnection.
+        this.closeWebRTC();
+        this.options.onDataChannelClosed?.(CONTROL_CHANNEL_LABEL);
+        this.options.onDataChannelClosed?.(FILE_CHANNEL_LABEL);
       }
     });
-    socket.on("room:left", () => this.resetSession());
+    socket.on("room:left", () => {
+      this.closeWebRTC();
+      this.resetSession();
+    });
     socket.on("peer:offer", (event) => {
       if (!this.resolveTargetPeer(event.fromPeerId)) return;
-      void this.getWebRTC().handleRemoteDescription(event.sessionDescription);
+      if (!this.webrtc) return;
+      void this.webrtc.handleRemoteDescription(event.sessionDescription);
     });
     socket.on("peer:answer", (event) => {
       if (!this.resolveTargetPeer(event.fromPeerId)) return;
-      void this.getWebRTC().handleRemoteDescription(event.sessionDescription);
+      if (!this.webrtc) return;
+      void this.webrtc.handleRemoteDescription(event.sessionDescription);
     });
     socket.on("peer:ice-candidate", (event) => {
       if (!this.resolveTargetPeer(event.fromPeerId)) return;
-      void this.getWebRTC().handleIceCandidate(event.candidate);
+      if (!this.webrtc) return;
+      void this.webrtc.handleIceCandidate(event.candidate);
     });
     socket.on("error", (error) => this.options.onError?.(error));
     (
@@ -179,9 +192,10 @@ export class RoomController {
       });
     });
     socket.on("disconnect", () => {
-      this.webrtc?.close();
-      this.webrtc = null;
+      this.closeWebRTC();
       this.resetSession();
+      this.options.onDataChannelClosed?.(CONTROL_CHANNEL_LABEL);
+      this.options.onDataChannelClosed?.(FILE_CHANNEL_LABEL);
     });
   }
 
@@ -203,8 +217,11 @@ export class RoomController {
 
   async joinRoom(roomCode: RoomCode, shareToken?: Base64Url): Promise<void> {
     if (shareToken) {
+      // Keep the token so this peer can also verify a peer's identity proof.
+      this.shareToken = shareToken;
       this.encryptionKey = await deriveRoomKey(shareToken);
     } else {
+      this.shareToken = null;
       this.encryptionKey = null;
     }
     this.signaling.joinRoom({ roomCode, role: "receiver" });
@@ -244,6 +261,35 @@ export class RoomController {
 
   getShareToken(): Base64Url | null {
     return this.shareToken;
+  }
+
+  /**
+   * Proves possession of the room's share token for a given user id. Anyone
+   * who can call this holds the same secret the receiver does, so a peer cannot
+   * assert an identity it has not proven.
+   */
+  async createIdentityProof(userId: string): Promise<string | null> {
+    if (!this.shareToken) return null;
+    const material = await globalThis.crypto.subtle.importKey(
+      "raw",
+      base64UrlToBytes(this.shareToken),
+      "HMAC",
+      false,
+      ["sign"]
+    );
+    const signature = await globalThis.crypto.subtle.sign(
+      "HMAC",
+      material,
+      new TextEncoder().encode(`droplink-identity:${userId}`)
+    );
+    let binary = "";
+    for (const byte of new Uint8Array(signature)) {
+      binary += String.fromCharCode(byte);
+    }
+    return btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
   }
 
   getRoom(): RoomInfo | null {
@@ -370,13 +416,6 @@ export class RoomController {
     });
   }
 
-  private getWebRTC(): WebRTCManager {
-    if (!this.webrtc) {
-      throw new Error("WebRTC manager is not initialized for this session");
-    }
-    return this.webrtc;
-  }
-
   private readonly handleOffer = (description: SessionDescription): void => {
     if (!this.room || !this.targetPeerId) return;
     this.signaling.sendOffer({
@@ -403,6 +442,11 @@ export class RoomController {
       candidate,
     });
   };
+
+  private closeWebRTC(): void {
+    this.webrtc?.close();
+    this.webrtc = null;
+  }
 
   private resetSession(): void {
     this.room = null;

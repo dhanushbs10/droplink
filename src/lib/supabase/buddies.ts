@@ -36,6 +36,7 @@ export async function getSelfUsername(
   userId?: string
 ): Promise<{ userId: string; username: string } | null> {
   const supabase = getSupabase();
+  if (!supabase) return null;
   const authUserId = userId ?? (await supabase.auth.getUser()).data.user?.id;
   if (!authUserId) return null;
 
@@ -54,10 +55,12 @@ export async function getSelfUsername(
 export async function shareProfile(controller: RoomController): Promise<void> {
   const self = await getSelfUsername();
   if (!self) return;
+  const identityProof = await controller.createIdentityProof(self.userId);
   await controller.sendControlMessage({
     kind: "profile-share",
     userId: self.userId,
     username: self.username,
+    identityProof: identityProof ?? undefined,
   });
 }
 
@@ -70,8 +73,19 @@ export async function rememberPeer(
   if (!message.userId || !message.username) return;
   if (message.userId === self.userId) return;
 
+  // The peer-asserted userId is only trustworthy if it is bound to the room's
+  // share token. Without this check anyone in the room could claim to be any
+  // existing user and forge a connection history.
+  const expectedProof = await controller.createIdentityProof(message.userId);
+  if (!expectedProof || message.identityProof !== expectedProof) {
+    console.warn("Ignored an unverified profile-share from the peer.");
+    return;
+  }
+
   const roomCode = controller.getRoom()?.roomCode ?? null;
-  const { error } = await getSupabase()
+  const supabase = getSupabase();
+  if (!supabase) return;
+  const { error } = await supabase
     .from("buddies")
     .upsert(
       {
@@ -92,6 +106,7 @@ export async function fetchRecentBuddies(): Promise<{
   buddies: Buddy[];
 }> {
   const supabase = getSupabase();
+  if (!supabase) return { user: null, buddies: [] };
   const { data } = await supabase.auth.getUser();
   const user = data.user;
   if (!user) return { user: null, buddies: [] };

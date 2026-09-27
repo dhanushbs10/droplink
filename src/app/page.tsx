@@ -16,7 +16,7 @@ import {
   formatRelative,
   type Buddy,
 } from "@/lib/supabase/buddies";
-import { getSupabase } from "@/lib/supabase/client";
+import { getSupabase, isSupabaseConfigured } from "@/lib/supabase/client";
 
 const CLAIMS = [
   {
@@ -39,10 +39,19 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [buddies, setBuddies] = useState<Buddy[]>([]);
   const [buddiesLoaded, setBuddiesLoaded] = useState(false);
+  // When accounts are not configured there is nothing to load, so the panel is
+  // never in a loading state. Derived during render rather than set in an effect.
+  const accountsConfigured = isSupabaseConfigured();
+  const buddiesPending = accountsConfigured && !buddiesLoaded;
 
   useEffect(() => {
     let active = true;
     const supabase = getSupabase();
+    if (!supabase) {
+      // No account backend: nothing to load. Derive the "loaded" state during
+      // render instead of setting it from inside the effect.
+      return;
+    }
     let refreshInFlight = false;
     let refreshQueued = false;
     const refresh = async () => {
@@ -192,7 +201,7 @@ export default function Home() {
                   </span>
                 )}
               </div>
-              {!buddiesLoaded ? (
+              {buddiesPending ? (
                 <p className="mt-4 text-sm text-zinc-600">Loading...</p>
               ) : buddies.length === 0 ? (
                 <p className="mt-4 text-sm text-zinc-500">

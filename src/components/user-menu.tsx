@@ -6,7 +6,7 @@ import type { User } from "@supabase/supabase-js";
 
 import { AuthDialog } from "@/components/auth-dialog";
 import { Button } from "@/components/ui/button";
-import { getSupabase } from "@/lib/supabase/client";
+import { getSupabase, isSupabaseConfigured } from "@/lib/supabase/client";
 
 function initialsFor(email: string): string {
   const local = email.split("@")[0] ?? "";
@@ -24,8 +24,15 @@ export function UserMenu() {
   useEffect(() => {
     let active = true;
     let generation = 0;
-    getSupabase()
-      .auth.getUser()
+    // Account features are optional; bail out quietly when unconfigured so the
+    // surrounding page keeps working.
+    const supabase = getSupabase();
+    if (!supabase) {
+      return;
+    }
+
+    supabase.auth
+      .getUser()
       .then(({ data }) => {
         if (active && generation === 0) {
           setUser(data.user ?? null);
@@ -41,7 +48,7 @@ export function UserMenu() {
 
     const {
       data: { subscription },
-    } = getSupabase().auth.onAuthStateChange((event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       generation += 1;
       setUser(session?.user ?? null);
       setLoading(false);
@@ -56,14 +63,20 @@ export function UserMenu() {
 
   const logout = async () => {
     setOpen(false);
-    await getSupabase().auth.signOut();
+    await getSupabase()?.auth.signOut();
   };
 
-  if (loading) {
+  // With no account backend there is no session to wait for.
+  const pending = isSupabaseConfigured() && loading;
+
+  if (pending) {
     return <span className="h-8 w-8 rounded-[4px] border border-zinc-800 bg-zinc-900/60" />;
   }
 
   if (!user) {
+    // Accounts are optional; don't offer a Login affordance when the backend
+    // is not configured for this deployment.
+    if (!isSupabaseConfigured()) return null;
     return (
       <>
         <Button

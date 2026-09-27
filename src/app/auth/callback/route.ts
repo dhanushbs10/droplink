@@ -5,7 +5,22 @@ import { cookies } from "next/headers";
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/";
+  const error = searchParams.get("error");
+  const errorDescription = searchParams.get("error_description");
+  const rawNext = searchParams.get("next") ?? "/";
+  // Only same-site absolute paths are allowed; protocol-relative or absolute
+  // URLs would turn this into an open redirect.
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//")
+    ? rawNext
+    : "/";
+
+  // Surface OAuth failures instead of silently bouncing to the home page.
+  if (error) {
+    const message = errorDescription
+      ? `${error}: ${errorDescription}`
+      : error;
+    return NextResponse.redirect(`${origin}/?auth_error=${encodeURIComponent(message)}`);
+  }
 
   if (code) {
     const cookieStore = await cookies();
@@ -27,17 +42,12 @@ export async function GET(request: Request) {
         },
       }
     );
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
-      const forwardedHost = request.headers.get("x-forwarded-host");
-      const isLocalEnv = process.env.NODE_ENV === "development";
-      if (isLocalEnv) {
-        return NextResponse.redirect(`${origin}${next}`);
-      } else if (forwardedHost) {
-        return NextResponse.redirect(`https://${forwardedHost}${next}`);
-      } else {
-        return NextResponse.redirect(`${origin}${next}`);
-      }
+    const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+    if (!exchangeError) {
+      // Always redirect to a host we control. Previously this trusted the
+      // X-Forwarded-Host header, which let an attacker send a freshly
+      // authenticated user to an arbitrary origin.
+      return NextResponse.redirect(`${origin}${next}`);
     }
   }
 
