@@ -84,17 +84,14 @@ function parseShareInput(input: string): {
     const url = new URL(trimmed);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
     const hostname = url.hostname.toLowerCase();
-    const allowedHosts = new Set<string>();
-    allowedHosts.add("droplink.app");
-    allowedHosts.add("localhost");
+    const allowedHosts = new Set<string>(["localhost"]);
     if (typeof window !== "undefined") {
       allowedHosts.add(window.location.host.toLowerCase());
       allowedHosts.add(window.location.hostname.toLowerCase());
     }
     const isAllowed =
       allowedHosts.has(hostname) ||
-      hostname.endsWith(".vercel.app") ||
-      hostname.endsWith(".droplink.app");
+      hostname.endsWith(".vercel.app");
     if (!isAllowed) return null;
     hash = url.hash;
   } catch {
@@ -495,7 +492,7 @@ export default function ReceivePage() {
                       spellCheck={false}
                       value={linkInput}
                       onChange={(e) => setLinkInput(e.target.value)}
-                      placeholder="https://droplink.app/receive#!/join/..."
+                      placeholder={`${typeof window !== "undefined" ? window.location.origin : "https://droplink1.vercel.app"}/receive#!/join/...`}
                       className="h-10 flex-1 rounded-[4px] border border-zinc-800 bg-zinc-950 px-3 font-mono text-sm text-zinc-200 outline-none transition-colors placeholder:text-zinc-600 focus:border-zinc-600"
                     />
                     <Button

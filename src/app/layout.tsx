@@ -5,7 +5,10 @@ import { SiteHeader } from "@/components/site-header";
 import { HeaderSlot } from "@/components/header-slot";
 import "./globals.css";
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://droplink.app";
+// Server-rendered metadata has no request context, so this relies on
+// NEXT_PUBLIC_SITE_URL being set at build time. Keep the default pointed at the
+// real deployment.
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://droplink1.vercel.app";
 
 const inter = Inter({
   subsets: ["latin"],

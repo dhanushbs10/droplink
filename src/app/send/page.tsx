@@ -19,7 +19,19 @@ import {
   type RoomCode,
 } from "@/lib/types/protocol";
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://droplink.app";
+/**
+ * Build the share link against the origin that is actually serving the page.
+ * A build-time NEXT_PUBLIC_SITE_URL can be unset or stale (pointing at a domain
+ * this deployment does not own), which produces share links that dead-end for
+ * the receiver. window.location is authoritative at runtime, so prefer it and
+ * fall back to the env value only during SSR.
+ */
+function resolveSiteUrl(): string {
+  if (typeof window !== "undefined" && window.location.origin) {
+    return window.location.origin;
+  }
+  return process.env.NEXT_PUBLIC_SITE_URL ?? "https://droplink1.vercel.app";
+}
 
 type Status =
   | "idle"
@@ -378,7 +390,7 @@ export default function SendPage() {
       const initiated = await controller.initiateRoom();
       setRoomCode(initiated.roomCode);
       setShareLink(
-        `${SITE_URL}/receive#!/join/${initiated.roomCode}?t=${initiated.shareToken}`
+        `${resolveSiteUrl()}/receive#!/join/${initiated.roomCode}?t=${initiated.shareToken}`
       );
       setStatus("waiting");
     } catch (error) {
